@@ -101,3 +101,61 @@ func TestGetIscsiHostNumbersForTargetIqns_MatchAndScope(t *testing.T) {
 		t.Fatalf("expected no hosts for no-match, got %v", hosts)
 	}
 }
+
+// TestFilterEmptyTargets verifies that empty-string entries are stripped while
+// non-empty target IQNs are preserved in order. This gates the APP-failover
+// primary-skip decision in HandleIscsiDiscovery, where model.Volume.TargetNames()
+// returns []string{""} for a volume with no target IQNs.
+func TestFilterEmptyTargets(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{
+			name:  "nil slice",
+			input: nil,
+			want:  nil,
+		},
+		{
+			name:  "empty slice",
+			input: []string{},
+			want:  nil,
+		},
+		{
+			name:  "single empty string (TargetNames of empty volume)",
+			input: []string{""},
+			want:  nil,
+		},
+		{
+			name:  "all empty strings",
+			input: []string{"", "", ""},
+			want:  nil,
+		},
+		{
+			name:  "single valid target",
+			input: []string{"iqn.2023-24.com.hpe:target1"},
+			want:  []string{"iqn.2023-24.com.hpe:target1"},
+		},
+		{
+			name:  "mixed empty and valid preserves order",
+			input: []string{"", "iqn.2023-24.com.hpe:target1", "", "iqn.2023-24.com.hpe:target2"},
+			want:  []string{"iqn.2023-24.com.hpe:target1", "iqn.2023-24.com.hpe:target2"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterEmptyTargets(tc.input)
+			if len(got) != len(tc.want) {
+				t.Fatalf("filterEmptyTargets(%v) = %v, want %v", tc.input, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("filterEmptyTargets(%v)[%d] = %q, want %q", tc.input, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
