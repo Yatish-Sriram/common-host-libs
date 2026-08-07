@@ -3,8 +3,89 @@ package tunelinux
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/hpe-storage/common-host-libs/linux"
 )
+
+func TestReconfigureMultipathdIfConfigNotApplied(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "multipath.conf")
+	appliedHashPath := filepath.Join(tempDir, "run", "multipath-config.sha256")
+	config := []byte("defaults {\n\tfind_multipaths no\n}\n")
+	if err := os.WriteFile(configPath, config, 0600); err != nil {
+		t.Fatalf("write multipath config: %v", err)
+	}
+	reconfigureCalls := 0
+	reconfigure := func() (string, error) {
+		reconfigureCalls++
+		return "ok", nil
+	}
+
+	if err := reconfigureMultipathdIfConfigNotApplied(configPath, appliedHashPath, reconfigure); err != nil {
+		t.Fatalf("initial reconfigureMultipathdIfConfigNotApplied() error = %v, want nil", err)
+	}
+	if reconfigureCalls != 1 {
+		t.Fatalf("reconfigure called %d times without applied state, want 1", reconfigureCalls)
+	}
+
+	if err := reconfigureMultipathdIfConfigNotApplied(configPath, appliedHashPath, reconfigure); err != nil {
+		t.Fatalf("repeat reconfigureMultipathdIfConfigNotApplied() error = %v, want nil", err)
+	}
+	if reconfigureCalls != 1 {
+		t.Fatalf("reconfigure called %d times for applied content, want 1", reconfigureCalls)
+	}
+
+	if err := os.WriteFile(configPath, append(config, []byte("devices {}\n")...), 0600); err != nil {
+		t.Fatalf("update multipath config: %v", err)
+	}
+	if err := reconfigureMultipathdIfConfigNotApplied(configPath, appliedHashPath, reconfigure); err != nil {
+		t.Fatalf("changed reconfigureMultipathdIfConfigNotApplied() error = %v, want nil", err)
+	}
+	if reconfigureCalls != 2 {
+		t.Fatalf("reconfigure called %d times for changed content, want 2", reconfigureCalls)
+	}
+}
+
+func TestReconfigureMultipathdIfConfigNotAppliedRetriesAfterFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "multipath.conf")
+	appliedHashPath := filepath.Join(tempDir, "run", "multipath-config.sha256")
+	if err := os.WriteFile(configPath, []byte("defaults {}\n"), 0600); err != nil {
+		t.Fatalf("write multipath config: %v", err)
+	}
+	reconfigureCalls := 0
+	reconfigure := func() (string, error) {
+		reconfigureCalls++
+		if reconfigureCalls == 1 {
+			return "", errors.New("reconfigure failed")
+		}
+		return "ok", nil
+	}
+
+	if err := reconfigureMultipathdIfConfigNotApplied(configPath, appliedHashPath, reconfigure); err == nil {
+		t.Fatal("first reconfigureMultipathdIfConfigNotApplied() error = nil, want error")
+	}
+	if err := reconfigureMultipathdIfConfigNotApplied(configPath, appliedHashPath, reconfigure); err != nil {
+		t.Fatalf("retry reconfigureMultipathdIfConfigNotApplied() error = %v, want nil", err)
+	}
+	if reconfigureCalls != 2 {
+		t.Fatalf("reconfigure called %d times after initial failure, want 2", reconfigureCalls)
+	}
+}
+
+func TestReconfigureMultipathdIfConfigNotAppliedReturnsReadError(t *testing.T) {
+	tempDir := t.TempDir()
+	err := reconfigureMultipathdIfConfigNotApplied(filepath.Join(tempDir, "missing.conf"), filepath.Join(tempDir, "state", "hash"), func() (string, error) {
+		t.Fatal("reconfigure called when config could not be read")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("reconfigureMultipathdIfConfigNotApplied() error = nil, want read error")
+	}
+}
 
 func TestParseMultipathDevices(t *testing.T) {
 	tests := []struct {
@@ -138,46 +219,24 @@ func TestParseMultipathDevicesValidJSONWithQTimeoutsNotTimeout(t *testing.T) {
 	}
 }
 
-func withStubbedExec(t *testing.T, fn func(cmd string, args []string) (string, int, error)) {
+func withStubbedExec(t *testing.T, fn func(cmd string, args []string, timeout int) (string, int, error)) {
 	t.Helper()
 	origExec := execCommandOutput
-	origSleep := multipathTimeoutRetrySleep
 	execCommandOutput = fn
-	multipathTimeoutRetrySleep = 0
 	t.Cleanup(func() {
 		execCommandOutput = origExec
-		multipathTimeoutRetrySleep = origSleep
 	})
 }
 
 var errExecTimeout = fmt.Errorf("command multipathd killed as timeout of 60 seconds reached")
 
-func TestGetMultipathDevicesRetriesOnExecTimeout(t *testing.T) {
+func TestGetMultipathDevicesReturnsTimeoutError(t *testing.T) {
 	calls := 0
-	withStubbedExec(t, func(cmd string, args []string) (string, int, error) {
+	withStubbedExec(t, func(cmd string, args []string, timeout int) (string, int, error) {
 		calls++
-		if calls < multipathTimeoutMaxTries {
-			return "", 888, errExecTimeout
+		if timeout != linux.MultipathdCommandTimeout() {
+			t.Fatalf("timeout = %d, want %d", timeout, linux.MultipathdCommandTimeout())
 		}
-		return `{"maps":[{"name":"healthy","vend":"Nimble","paths":2}]}`, 0, nil
-	})
-
-	devices, err := GetMultipathDevices()
-	if err != nil {
-		t.Fatalf("GetMultipathDevices() error = %v, want nil", err)
-	}
-	if calls != multipathTimeoutMaxTries {
-		t.Fatalf("execCommandOutput called %d times, want %d", calls, multipathTimeoutMaxTries)
-	}
-	if len(devices) != 1 {
-		t.Fatalf("GetMultipathDevices() returned %d devices, want 1", len(devices))
-	}
-}
-
-func TestGetMultipathDevicesExhaustsRetriesOnExecTimeout(t *testing.T) {
-	calls := 0
-	withStubbedExec(t, func(cmd string, args []string) (string, int, error) {
-		calls++
 		return "", 888, errExecTimeout
 	})
 
@@ -188,14 +247,14 @@ func TestGetMultipathDevicesExhaustsRetriesOnExecTimeout(t *testing.T) {
 	if devices != nil {
 		t.Fatalf("GetMultipathDevices() devices = %v, want nil", devices)
 	}
-	if calls != multipathTimeoutMaxTries {
-		t.Fatalf("execCommandOutput called %d times, want %d", calls, multipathTimeoutMaxTries)
+	if calls != 1 {
+		t.Fatalf("execCommandOutput called %d times, want 1", calls)
 	}
 }
 
-func TestGetMultipathDevicesDoesNotRetryOnNonTimeoutError(t *testing.T) {
+func TestGetMultipathDevicesReturnsNonTimeoutError(t *testing.T) {
 	calls := 0
-	withStubbedExec(t, func(cmd string, args []string) (string, int, error) {
+	withStubbedExec(t, func(cmd string, args []string, timeout int) (string, int, error) {
 		calls++
 		return "", 1, fmt.Errorf("multipathd: command not found")
 	})
@@ -214,7 +273,7 @@ func TestGetMultipathDevicesDoesNotRetryOnNonTimeoutError(t *testing.T) {
 
 func TestGetMultipathDevicesValidJSONWithQTimeoutsNoRetry(t *testing.T) {
 	calls := 0
-	withStubbedExec(t, func(cmd string, args []string) (string, int, error) {
+	withStubbedExec(t, func(cmd string, args []string, timeout int) (string, int, error) {
 		calls++
 		return `{"maps":[{"name":"mpatha","vend":"3PARdata","paths":2,"q_timeouts":0,"total_q_time":0}]}`, 0, nil
 	})

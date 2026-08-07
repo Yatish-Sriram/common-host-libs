@@ -2,6 +2,7 @@
 package linux
 
 import (
+	"os"
 	"regexp"
 	"testing"
 
@@ -84,6 +85,54 @@ func TestMatchesWWID(t *testing.T) {
 	}
 }
 
+func TestLoadMultipathdTimeouts(t *testing.T) {
+	tests := []struct {
+		name               string
+		value              string
+		wantUxsockTimeout  int
+		wantCommandTimeout int
+	}{
+		{name: "default", wantUxsockTimeout: 300000, wantCommandTimeout: 305},
+		{name: "configured", value: "60000", wantUxsockTimeout: 60000, wantCommandTimeout: 65},
+		{name: "rounds partial second up", value: "60001", wantUxsockTimeout: 60001, wantCommandTimeout: 66},
+		{name: "zero falls back", value: "0", wantUxsockTimeout: 300000, wantCommandTimeout: 305},
+		{name: "negative falls back", value: "-1", wantUxsockTimeout: 300000, wantCommandTimeout: 305},
+		{name: "invalid falls back", value: "invalid", wantUxsockTimeout: 300000, wantCommandTimeout: 305},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(multipathUxsockTimeoutEnvVar, test.value)
+			if test.name == "default" {
+				if err := os.Unsetenv(multipathUxsockTimeoutEnvVar); err != nil {
+					t.Fatalf("unset %s: %v", multipathUxsockTimeoutEnvVar, err)
+				}
+			}
+
+			gotUxsockTimeout, gotCommandTimeout := loadMultipathdTimeouts()
+			if gotUxsockTimeout != test.wantUxsockTimeout {
+				t.Fatalf("loadMultipathdTimeouts() uxsock timeout = %d, want %d", gotUxsockTimeout, test.wantUxsockTimeout)
+			}
+			if gotCommandTimeout != test.wantCommandTimeout {
+				t.Fatalf("loadMultipathdTimeouts() command timeout = %d, want %d", gotCommandTimeout, test.wantCommandTimeout)
+			}
+		})
+	}
+}
+
+func TestMultipathdCommandTimeoutIsCached(t *testing.T) {
+	wantUxsockTimeout := MultipathdUxsockTimeout()
+	wantCommandTimeout := MultipathdCommandTimeout()
+	t.Setenv(multipathUxsockTimeoutEnvVar, "1")
+
+	if got := MultipathdUxsockTimeout(); got != wantUxsockTimeout {
+		t.Fatalf("MultipathdUxsockTimeout() = %d after environment change, want cached value %d", got, wantUxsockTimeout)
+	}
+	if got := MultipathdCommandTimeout(); got != wantCommandTimeout {
+		t.Fatalf("MultipathdCommandTimeout() = %d after environment change, want cached value %d", got, wantCommandTimeout)
+	}
+}
+
 // ---- orphanPathsPattern regex tests ----
 
 // Simulated multipathd show paths lines in format: %w %d %t %i %o %T %z %s %m
@@ -118,14 +167,14 @@ var orphanRegexTests = []struct {
 		wantLun:    "3",
 	},
 	{
-		name:       "non-orphan path: belongs to mpathcd",
-		line:       "360002ac0000000000200d34e0007f544 sdh active 33:0:0:1 running ready tur 3PARdata,VV mpathcd",
-		wantMatch:  false,
+		name:      "non-orphan path: belongs to mpathcd",
+		line:      "360002ac0000000000200d34e0007f544 sdh active 33:0:0:1 running ready tur 3PARdata,VV mpathcd",
+		wantMatch: false,
 	},
 	{
-		name:       "unknown vendor: should not match",
-		line:       "360002ac0000000000200d34e0007f544 sdc active 33:0:0:1 running ready tur UNKNOWN,VV [orphan]",
-		wantMatch:  false,
+		name:      "unknown vendor: should not match",
+		line:      "360002ac0000000000200d34e0007f544 sdc active 33:0:0:1 running ready tur UNKNOWN,VV [orphan]",
+		wantMatch: false,
 	},
 	{
 		name:       "TrueNAS orphan path",
@@ -195,11 +244,11 @@ func filterOrphanLines(lines []string, serialNumber, lunID string) []string {
 }
 
 var orphanFilterTests = []struct {
-	name       string
-	lines      []string
-	serial     string
-	lunID      string
-	wantHCTLs  []string
+	name      string
+	lines     []string
+	serial    string
+	lunID     string
+	wantHCTLs []string
 }{
 	{
 		name: "array1 serial matches only array1 orphans at same LUN",

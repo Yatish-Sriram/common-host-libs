@@ -17,9 +17,40 @@ limitations under the License.
 package util
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestLoadDefaultTimeout(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  int
+	}{
+		{name: "unset", want: defaultTimeoutSeconds},
+		{name: "valid", value: "120", set: true, want: 120},
+		{name: "zero", value: "0", set: true, want: defaultTimeoutSeconds},
+		{name: "negative", value: "-1", set: true, want: defaultTimeoutSeconds},
+		{name: "not an integer", value: "invalid", set: true, want: defaultTimeoutSeconds},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(cmdTimeoutEnvVar, test.value)
+			if !test.set {
+				if err := os.Unsetenv(cmdTimeoutEnvVar); err != nil {
+					t.Fatalf("unset %s: %v", cmdTimeoutEnvVar, err)
+				}
+			}
+
+			if got := loadDefaultTimeout(); got != test.want {
+				t.Fatalf("loadDefaultTimeout() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
 
 func TestEchoExecCommandOutput(t *testing.T) {
 	out, rc, err := ExecCommandOutput("echo", []string{"Hello"})
