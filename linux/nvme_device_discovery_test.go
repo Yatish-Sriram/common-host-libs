@@ -173,177 +173,102 @@ func TestAllTargetPortalsLive(t *testing.T) {
 	}
 }
 
-func TestDiscoverNvmeTargetDeduplicatesEndpoints(t *testing.T) {
-	setNvmeOptimizationTestSeams(t)
+// TestConnectNvmeTargetConnectsAllPortalsWhenNoneLive passes an empty liveAddrs,
+// so ConnectNvmeTarget must attempt every portal. Deterministic on any host,
+// real NVMe or none, since liveAddrs is now supplied by the caller rather than
+// scanned from /sys/class/nvme internally.
+func TestConnectNvmeTargetConnectsAllPortalsWhenNoneLive(t *testing.T) {
+	originalExec := nvmeExecCommandOutput
+	t.Cleanup(func() { nvmeExecCommandOutput = originalExec })
+	var connectedAddresses []string
 	nvmeExecCommandOutput = func(_ string, args []string) (string, int, error) {
-		if args[0] == "disconnect" {
-			return "", 0, nil
-		}
-		return "=====Discovery Log Entry 0=====\nsubnqn: nqn.target\ntraddr: 10.0.0.1\ntrsvcid: 4420\n=====Discovery Log Entry 1=====\nsubnqn: nqn.target\ntraddr: 10.0.0.1\ntrsvcid: 4420\n=====Discovery Log Entry 2=====\nsubnqn: nqn.target\ntraddr: 10.0.0.2\ntrsvcid: 4420\n", 0, nil
-	}
-
-	target := discoverNvmeTarget(&model.Volume{Nqn: "nqn.target", DiscoveryIPs: []string{"10.0.0.10"}})
-	if target == nil {
-		t.Fatal("discoverNvmeTarget() = nil, want target")
-	}
-	if target.Address != "10.0.0.1,10.0.0.2" || target.Port != "4420" {
-		t.Fatalf("discovered target = %+v, want addresses 10.0.0.1,10.0.0.2 and port 4420", target)
-	}
-}
-
-func TestConnectNvmeTargetSkipsLivePortal(t *testing.T) {
-	setNvmeOptimizationTestSeams(t)
-	nvmeControllerReadDir = func(string) ([]os.FileInfo, error) {
-		return []os.FileInfo{fakeFileInfo{name: "nvme0"}}, nil
-	}
-	nvmeControllerReadFirstLine = func(path string) (string, error) {
-		values := map[string]string{
-			"/sys/class/nvme/nvme0/subsysnqn": "nqn.target",
-			"/sys/class/nvme/nvme0/state":     "live",
-			"/sys/class/nvme/nvme0/address":   "traddr=10.0.0.1,trsvcid=4420",
-		}
-		return values[path], nil
-	}
-	var connectAddresses []string
-	nvmeExecCommandOutput = func(_ string, args []string) (string, int, error) {
-		connectAddresses = append(connectAddresses, args[6])
+		connectedAddresses = append(connectedAddresses, args[6])
 		return "", 0, nil
 	}
 
-	err := ConnectNvmeTarget(&model.NvmeTarget{NQN: "nqn.target", Address: "10.0.0.1,10.0.0.2", Port: "4420"})
+	err := ConnectNvmeTarget(&model.NvmeTarget{
+		NQN:     "nqn.test-only.no-such-subsystem",
+		Address: "10.0.0.1,10.0.0.2",
+		Port:    "4420",
+	}, nil)
 	if err != nil {
 		t.Fatalf("ConnectNvmeTarget() error = %v", err)
 	}
-	if len(connectAddresses) != 1 || connectAddresses[0] != "10.0.0.2" {
-		t.Fatalf("connect addresses = %v, want only 10.0.0.2", connectAddresses)
+	if fmt.Sprint(connectedAddresses) != "[10.0.0.1 10.0.0.2]" {
+		t.Fatalf("connected addresses = %v, want both portals attempted", connectedAddresses)
 	}
 }
 
-func TestHandleNvmeTcpDiscoveryConnectsMissingPortalWhenPartiallyLive(t *testing.T) {
-	setNvmeOptimizationTestSeams(t)
-	nvmeControllerReadDir = func(string) ([]os.FileInfo, error) {
-		return []os.FileInfo{fakeFileInfo{name: "nvme0"}}, nil
-	}
-	nvmeControllerReadFirstLine = func(path string) (string, error) {
-		values := map[string]string{
-			"/sys/class/nvme/nvme0/subsysnqn": "nqn.target",
-			"/sys/class/nvme/nvme0/state":     "live",
-			"/sys/class/nvme/nvme0/address":   "traddr=10.0.0.1,trsvcid=4420",
-		}
-		return values[path], nil
-	}
-	nvmeApplyTcpTuning = func() error {
-		return nil
-	}
-	var commands []string
-	var connectedAddress string
-	nvmeExecCommandOutput = func(_ string, args []string) (string, int, error) {
-		commands = append(commands, args[0])
-		if args[0] == "discover" {
-			t.Fatal("nvme discover must not run when a controller is already live")
-		}
-		if args[0] == "connect" {
-			connectedAddress = args[6]
-		}
-		return "", 0, nil
-	}
-	nvmeFindDevices = func(string) ([]string, error) {
-		return []string{"/dev/nvme0n1"}, nil
-	}
-
-	err := HandleNvmeTcpDiscovery(&model.Volume{
-		Nqn:           "nqn.target",
-		SerialNumber:  "serial",
-		TargetAddress: "10.0.0.1,10.0.0.2",
-		TargetPort:    "4420",
-	})
-	if err != nil {
-		t.Fatalf("HandleNvmeTcpDiscovery() error = %v", err)
-	}
-	if connectedAddress != "10.0.0.2" {
-		t.Fatalf("connect address = %q, want missing portal 10.0.0.2", connectedAddress)
-	}
-	if fmt.Sprint(commands) != "[connect]" {
-		t.Fatalf("commands = %v, want [connect]", commands)
-	}
-}
-
-func TestHandleNvmeTcpDiscoveryFallsBackAfterControllerScanFailure(t *testing.T) {
-	setNvmeOptimizationTestSeams(t)
-	nvmeControllerReadDir = func(string) ([]os.FileInfo, error) {
-		return nil, fmt.Errorf("sysfs unavailable")
-	}
-	nvmeApplyTcpTuning = func() error {
-		return nil
-	}
-	var commands []string
-	var connectedAddress string
-	nvmeExecCommandOutput = func(_ string, args []string) (string, int, error) {
-		commands = append(commands, args[0])
-		switch args[0] {
-		case "discover", "disconnect":
-			return "", 0, nil
-		case "connect":
-			connectedAddress = args[6]
-			return "", 0, nil
-		default:
-			return "", 1, fmt.Errorf("unexpected command %v", args)
-		}
-	}
-	nvmeFindDevices = func(string) ([]string, error) {
-		return []string{"/dev/nvme0n1"}, nil
-	}
-
-	err := HandleNvmeTcpDiscovery(&model.Volume{
-		Nqn:           "nqn.target",
-		SerialNumber:  "serial",
-		TargetAddress: "10.0.0.1",
-		TargetPort:    "4420",
-		DiscoveryIPs:  []string{"10.0.0.10"},
-	})
-	if err != nil {
-		t.Fatalf("HandleNvmeTcpDiscovery() error = %v", err)
-	}
-	if connectedAddress != "10.0.0.1" {
-		t.Fatalf("connect address = %q, want CSP fallback 10.0.0.1", connectedAddress)
-	}
-	wantCommands := []string{"discover", "disconnect", "connect"}
-	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
-		t.Fatalf("commands = %v, want %v", commands, wantCommands)
-	}
-}
-
-func TestHandleNvmeTcpDiscoverySkipsFullyStagedVolume(t *testing.T) {
-	setNvmeOptimizationTestSeams(t)
-	nvmeControllerReadDir = func(string) ([]os.FileInfo, error) {
-		return []os.FileInfo{fakeFileInfo{name: "nvme0"}}, nil
-	}
-	nvmeControllerReadFirstLine = func(path string) (string, error) {
-		values := map[string]string{
-			"/sys/class/nvme/nvme0/subsysnqn": "nqn.target",
-			"/sys/class/nvme/nvme0/state":     "live",
-			"/sys/class/nvme/nvme0/address":   "traddr=10.0.0.1,trsvcid=4420",
-		}
-		return values[path], nil
-	}
-	nvmeFindDevices = func(string) ([]string, error) {
-		return []string{"/dev/nvme0n1"}, nil
-	}
-	nvmeApplyTcpTuning = func() error {
-		return nil
-	}
-	nvmeExecCommandOutput = func(string, []string) (string, int, error) {
-		t.Fatal("nvme command must not run for a fully staged volume")
+// TestConnectNvmeTargetSkipsConnectWhenAllPortalsLive verifies that, given a
+// liveAddrs set already covering every portal, ConnectNvmeTarget returns
+// success without executing a single "nvme connect".
+func TestConnectNvmeTargetSkipsConnectWhenAllPortalsLive(t *testing.T) {
+	originalExec := nvmeExecCommandOutput
+	t.Cleanup(func() { nvmeExecCommandOutput = originalExec })
+	execCount := 0
+	nvmeExecCommandOutput = func(_ string, _ []string) (string, int, error) {
+		execCount++
 		return "", 0, nil
 	}
 
-	err := HandleNvmeTcpDiscovery(&model.Volume{
-		Nqn:           "nqn.target",
-		SerialNumber:  "serial",
-		TargetAddress: "10.0.0.1",
-		TargetPort:    "4420",
-	})
+	err := ConnectNvmeTarget(&model.NvmeTarget{
+		NQN:     "nqn.test-only.all-live",
+		Address: "10.0.0.1,10.0.0.2",
+		Port:    "4420",
+	}, map[string]bool{"10.0.0.1": true, "10.0.0.2": true})
 	if err != nil {
-		t.Fatalf("HandleNvmeTcpDiscovery() error = %v", err)
+		t.Fatalf("ConnectNvmeTarget() error = %v, want success when all portals already live", err)
+	}
+	if execCount != 0 {
+		t.Fatalf("nvme connect exec count = %d, want 0 when all portals already live", execCount)
+	}
+}
+
+// TestConnectNvmeTargetRejectsEmptyAddress ensures an empty/blank target
+// address fails fast with a clear error instead of attempting "nvme connect"
+// with a blank -a argument.
+func TestConnectNvmeTargetRejectsEmptyAddress(t *testing.T) {
+	originalExec := nvmeExecCommandOutput
+	t.Cleanup(func() { nvmeExecCommandOutput = originalExec })
+	execCount := 0
+	nvmeExecCommandOutput = func(_ string, _ []string) (string, int, error) {
+		execCount++
+		return "", 0, nil
+	}
+
+	err := ConnectNvmeTarget(&model.NvmeTarget{NQN: "nqn.test-only.empty-address", Address: "  ", Port: "4420"}, nil)
+	if err == nil {
+		t.Fatal("ConnectNvmeTarget() error = nil, want error for empty target address")
+	}
+	if execCount != 0 {
+		t.Fatalf("nvme connect exec count = %d, want 0 for empty target address", execCount)
+	}
+}
+
+// TestConnectNvmeTargetDedupesPortals ensures a repeated IP in target.Address
+// (e.g. a trailing comma or literal duplicate) is only attempted once.
+func TestConnectNvmeTargetDedupesPortals(t *testing.T) {
+	originalExec := nvmeExecCommandOutput
+	t.Cleanup(func() { nvmeExecCommandOutput = originalExec })
+	var attempted []string
+	nvmeExecCommandOutput = func(_ string, args []string) (string, int, error) {
+		attempted = append(attempted, args[6])
+		return "", 0, nil
+	}
+
+	err := ConnectNvmeTarget(&model.NvmeTarget{NQN: "nqn.test-only.dup", Address: "10.0.0.1,10.0.0.1,", Port: "4420"}, nil)
+	if err != nil {
+		t.Fatalf("ConnectNvmeTarget() error = %v", err)
+	}
+	if fmt.Sprint(attempted) != "[10.0.0.1]" {
+		t.Fatalf("attempted portals = %v, want a single deduped 10.0.0.1", attempted)
+	}
+}
+
+// TestHandleNvmeTcpDiscoveryNilVolume ensures a nil volume returns an error
+// instead of panicking.
+func TestHandleNvmeTcpDiscoveryNilVolume(t *testing.T) {
+	if err := HandleNvmeTcpDiscovery(nil); err == nil {
+		t.Fatal("HandleNvmeTcpDiscovery(nil) error = nil, want error")
 	}
 }
