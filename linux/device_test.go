@@ -233,3 +233,35 @@ func TestCheckRemappedLunPath_NonVendor_StableMismatch_NotRemapped(t *testing.T)
 		t.Fatalf("expected non-3PAR confirm step to reject a stable mismatch")
 	}
 }
+
+// TestCheckRemappedLunPath_3PAR_CacheUnreadable_NotRemapped covers review
+// follow-up Medium-2: when the cached vpd_pg80 can't be read, there is
+// nothing to corroborate the bare wwid mismatch against, so the fix must
+// fail safe (not a remap) rather than fall back to the old, pre-fix
+// behavior of trusting the wwid mismatch alone.
+func TestCheckRemappedLunPath_3PAR_CacheUnreadable_NotRemapped(t *testing.T) {
+	tmp := t.TempDir()
+	origBase := scsiDeviceBasePath
+	scsiDeviceBasePath = tmp
+	defer func() { scsiDeviceBasePath = origBase }()
+
+	origFunc := getDeviceSerialByHctlFunc
+	defer func() { getDeviceSerialByHctlFunc = origFunc }()
+
+	writeScsiDeviceAttr(t, tmp, "6:0:1:5", "state", "running")
+	writeScsiDeviceAttr(t, tmp, "6:0:1:5", "vendor", "3PARdata")
+	writeScsiDeviceAttr(t, tmp, "6:0:1:5", "wwid", "naa.foreignarrayserial")
+	// no vpd_pg80 written: getVpd80FromSysfs will fail to read it
+
+	getDeviceSerialByHctlFunc = func(h, c, tg, l string) (string, error) {
+		return "liveid", nil // live read succeeds, but there is nothing cached to compare it to
+	}
+
+	found, _, err := checkRemappedLunPath("6", "0", "1", "5", "myexpectedserial", "5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if found {
+		t.Fatalf("expected unreadable cached vpd_pg80 to fail safe (not remapped), got remapped=true")
+	}
+}
