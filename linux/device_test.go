@@ -62,6 +62,26 @@ func TestSecondaryRemapScopes(t *testing.T) {
 			t.Errorf("expected nil scopes for empty details, got %v", scopes)
 		}
 	})
+
+	// Multi-digit LUNs (every APP secondary LUN is >= 855) must be formatted to
+	// match /proc/scsi/scsi ("Lun: 858"), not "0858" — otherwise the remap check
+	// finds no paths and the whole secondary scoping is silently a no-op.
+	t.Run("multi-digit APP LUN is not zero-prefixed", func(t *testing.T) {
+		appDetails := marshal(
+			&model.SecondaryLunInfo{LunID: 858, TargetNames: []string{"20420002ac02fd01"}},
+			&model.SecondaryLunInfo{LunID: 0, TargetNames: []string{"20420002ac02fd02"}},
+		)
+		scopes := secondaryRemapScopes("fc", appDetails)
+		if len(scopes) != 2 {
+			t.Fatalf("expected 2 scopes, got %d", len(scopes))
+		}
+		if scopes[0].lunID != "858" {
+			t.Errorf("multi-digit lunID = %q, want %q (must match 'Lun: 858')", scopes[0].lunID, "858")
+		}
+		if scopes[1].lunID != "00" {
+			t.Errorf("zero lunID = %q, want %q", scopes[1].lunID, "00")
+		}
+	})
 }
 
 var parseHctlTests = []struct {
