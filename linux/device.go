@@ -952,7 +952,15 @@ func secondaryRemapScopes(accessProtocol, secondaryArrayDetails string) []second
 		if backend == nil {
 			continue
 		}
-		s := secondaryRemapScope{lunID: "0" + strconv.Itoa(int(backend.LunID))}
+		// Match the primary path's /proc/scsi/scsi LUN formatting: zero-pad only a
+		// single digit (e.g. 5 -> "05"), leave multi-digit LUNs as-is (858 -> "858").
+		// An unconditional "0" prefix would produce "0858", which never matches
+		// "Lun: 858" and would silently disable secondary remap scoping on APP.
+		lunStr := strconv.Itoa(int(backend.LunID))
+		if len(lunStr) == 1 {
+			lunStr = "0" + lunStr
+		}
+		s := secondaryRemapScope{lunID: lunStr}
 		if strings.EqualFold(accessProtocol, "fc") {
 			s.fcWwpns = backend.TargetNames
 		} else {
