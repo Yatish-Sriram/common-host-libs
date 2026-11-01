@@ -912,16 +912,43 @@ func handleRemappedLun(volume *model.Volume) (err error) {
 	if err != nil {
 		return err
 	}
-	lunIdArray := util.GetSecondaryArrayLUNIds(volume.SecondaryArrayDetails)
-	if len(lunIdArray) > 0 {
-		for _, secLunID := range lunIdArray {
-			err = handleRemapForSpecificLunID(volume.SerialNumber, "0"+strconv.Itoa(int(secLunID)), volume.AccessProtocol, volume.TargetNames(), getFcTargetWwpns(volume))
-			if err != nil {
-				return err
-			}
+	// Scope each secondary (replicated / Active Peer Persistence) LUN's remap check to
+	// that backend's OWN target names (FC WWPNs or iSCSI IQNs), not the primary array's,
+	// so a secondary path on a shared HBA is matched by its real rport instead of skipped
+	// (CON-5021 publishes these per-backend; CON-5018 FIX-1b).
+	for _, s := range secondaryRemapScopes(volume.AccessProtocol, volume.SecondaryArrayDetails) {
+		if err = handleRemapForSpecificLunID(volume.SerialNumber, s.lunID, volume.AccessProtocol, s.targetIqns, s.fcWwpns); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// secondaryRemapScope is the per-backend scoping input for a secondary LUN's remap check.
+type secondaryRemapScope struct {
+	lunID      string
+	targetIqns []string
+	fcWwpns    []string
+}
+
+// secondaryRemapScopes maps each secondary backend to the protocol-appropriate scope
+// (its own target names) so the remap check for a secondary LUN is scoped to that
+// backend's real rport rather than the primary array's (CON-5018 FIX-1b).
+func secondaryRemapScopes(accessProtocol, secondaryArrayDetails string) []secondaryRemapScope {
+	var scopes []secondaryRemapScope
+	for _, backend := range util.GetSecondaryBackends(secondaryArrayDetails) {
+		if backend == nil {
+			continue
+		}
+		s := secondaryRemapScope{lunID: "0" + strconv.Itoa(int(backend.LunID))}
+		if strings.EqualFold(accessProtocol, "fc") {
+			s.fcWwpns = backend.TargetNames
+		} else {
+			s.targetIqns = backend.TargetNames
+		}
+		scopes = append(scopes, s)
+	}
+	return scopes
 }
 
 // isPathInRemapScope reports whether a candidate h:c:t SCSI path belongs to the
