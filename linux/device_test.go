@@ -1,10 +1,68 @@
 package linux
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/hpe-storage/common-host-libs/model"
 )
+
+// TestSecondaryRemapScopes covers CON-5018 FIX-1b: each secondary (replicated / APP)
+// backend's remap check must be scoped to that backend's OWN target names, routed by
+// protocol (FC -> WWPNs, else -> IQNs), not the primary array's.
+func TestSecondaryRemapScopes(t *testing.T) {
+	marshal := func(backends ...*model.SecondaryLunInfo) string {
+		b, err := json.Marshal(model.SecondaryBackendDetails{PeerArrayDetails: backends})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	fcDetails := marshal(&model.SecondaryLunInfo{LunID: 5, TargetNames: []string{"20410002ac07ee45", "20420002ac07ee46"}})
+	iscsiDetails := marshal(&model.SecondaryLunInfo{LunID: 3, TargetNames: []string{"iqn.2000-05.com.3pardata:21"}})
+
+	t.Run("fc routes target names to WWPNs", func(t *testing.T) {
+		scopes := secondaryRemapScopes("fc", fcDetails)
+		if len(scopes) != 1 {
+			t.Fatalf("expected 1 scope, got %d", len(scopes))
+		}
+		if scopes[0].lunID != "05" {
+			t.Errorf("lunID = %q, want %q", scopes[0].lunID, "05")
+		}
+		if !reflect.DeepEqual(scopes[0].fcWwpns, []string{"20410002ac07ee45", "20420002ac07ee46"}) {
+			t.Errorf("fcWwpns = %v, want the secondary WWPNs", scopes[0].fcWwpns)
+		}
+		if scopes[0].targetIqns != nil {
+			t.Errorf("targetIqns must be nil for FC, got %v", scopes[0].targetIqns)
+		}
+	})
+
+	t.Run("iscsi routes target names to IQNs", func(t *testing.T) {
+		scopes := secondaryRemapScopes("iscsi", iscsiDetails)
+		if len(scopes) != 1 {
+			t.Fatalf("expected 1 scope, got %d", len(scopes))
+		}
+		if scopes[0].lunID != "03" {
+			t.Errorf("lunID = %q, want %q", scopes[0].lunID, "03")
+		}
+		if !reflect.DeepEqual(scopes[0].targetIqns, []string{"iqn.2000-05.com.3pardata:21"}) {
+			t.Errorf("targetIqns = %v, want the secondary IQNs", scopes[0].targetIqns)
+		}
+		if scopes[0].fcWwpns != nil {
+			t.Errorf("fcWwpns must be nil for iSCSI, got %v", scopes[0].fcWwpns)
+		}
+	})
+
+	t.Run("no secondary details yields no scopes", func(t *testing.T) {
+		if scopes := secondaryRemapScopes("fc", ""); scopes != nil {
+			t.Errorf("expected nil scopes for empty details, got %v", scopes)
+		}
+	})
+}
 
 var parseHctlTests = []struct {
 	name      string
