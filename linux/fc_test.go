@@ -260,3 +260,65 @@ func TestGetFcHostChannelTargetsForTargetWwpns_NoMatch(t *testing.T) {
 		t.Fatalf("expected empty set for no-match, got %v", set)
 	}
 }
+
+// TestGetFcHostChannelTargetsForTargetWwpns_ScsiTargetIdOverridesRportIndex covers
+// review follow-up Medium-3: the T segment of the rport-H:B-T directory name is
+// only the rport's enumeration index, not the real SCSI target id used by
+// /proc/scsi/scsi, and the two are not guaranteed to be equal. When the kernel
+// exposes scsi_target_id, it must be used in place of the directory-name T.
+func TestGetFcHostChannelTargetsForTargetWwpns_ScsiTargetIdOverridesRportIndex(t *testing.T) {
+	tmp := t.TempDir()
+	orig := fcRemotePortBasePath
+	fcRemotePortBasePath = tmp
+	defer func() { fcRemotePortBasePath = orig }()
+
+	// rport index (T=7) deliberately diverges from the real SCSI target (2).
+	dir := filepath.Join(tmp, "rport-5:0-7")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "port_name"), []byte("0x20410002ac07ee45\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scsi_target_id"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	set, err := GetFcHostChannelTargetsForTargetWwpns([]string{"20410002AC07EE45"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(set) != 1 || !set[fcHostChannelTargetKey("5", "0", "2")] {
+		t.Fatalf("expected the real SCSI target 5:0:2, got %v", set)
+	}
+	if set[fcHostChannelTargetKey("5", "0", "7")] {
+		t.Fatalf("must not scope using the rport enumeration index 5:0:7, got %v", set)
+	}
+}
+
+// TestGetFcHostChannelTargetsForTargetWwpns_NoScsiTargetIdFallsBackToRportIndex
+// verifies older kernels without a scsi_target_id attribute still work (falls
+// back to the directory-name T), preserving the pre-existing ESC-18223 fix
+// validation behavior.
+func TestGetFcHostChannelTargetsForTargetWwpns_NoScsiTargetIdFallsBackToRportIndex(t *testing.T) {
+	tmp := t.TempDir()
+	orig := fcRemotePortBasePath
+	fcRemotePortBasePath = tmp
+	defer func() { fcRemotePortBasePath = orig }()
+
+	dir := filepath.Join(tmp, "rport-5:0-7")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "port_name"), []byte("0x20410002ac07ee45\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	set, err := GetFcHostChannelTargetsForTargetWwpns([]string{"20410002AC07EE45"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(set) != 1 || !set[fcHostChannelTargetKey("5", "0", "7")] {
+		t.Fatalf("expected fallback to rport index 5:0:7, got %v", set)
+	}
+}

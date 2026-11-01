@@ -294,7 +294,16 @@ func GetFcHostChannelTargetsForTargetWwpns(targetWwpns []string) (map[string]boo
 			continue
 		}
 		channel := rest[:dashIdx]
+		// The T above is the rport's enumeration index, not necessarily the real
+		// SCSI target id that /proc/scsi/scsi uses (they are not guaranteed to be
+		// equal). Prefer the kernel-authoritative scsi_target_id attribute when
+		// it is present; fall back to the directory-name T otherwise.
 		target := rest[dashIdx+1:]
+		if scsiTargetID, terr := util.FileReadFirstLine(filepath.Join(fcRemotePortBasePath, name, "scsi_target_id")); terr == nil {
+			if scsiTargetID = strings.TrimSpace(scsiTargetID); scsiTargetID != "" {
+				target = scsiTargetID
+			}
+		}
 		key := fcHostChannelTargetKey(hostNum, channel, target)
 		hostChannelTargetSet[key] = true
 		log.Infof("FC remote port %s (wwpn %s) maps to host:channel:target %s", name, normalizeWwpn(portName), key)

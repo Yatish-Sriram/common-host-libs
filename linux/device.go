@@ -1042,7 +1042,6 @@ func handleRemapForSpecificLunID(serialNumber, lunID, accessProtocol string, tar
 		break
 	}
 	return nil
-
 }
 
 func getProcScsiPath() string {
@@ -1199,16 +1198,23 @@ func checkRemappedLunPath(h string, c string, t string, l string, serial string,
 		// this address since the kernel last probed it, so a bare wwid mismatch
 		// here most likely means this h:c:t:l belongs to a different, healthy
 		// array sharing the same host LUN ID (ESC-18223), not a genuine remap,
-		// and is not acted on. If the cached VPD80 reading isn't available,
-		// there's nothing to corroborate against, so fall back to trusting the
-		// wwid mismatch alone (the pre-existing behavior).
+		// and is not acted on.
 		cachedVpd80, cachedErr := getVpd80FromSysfs(h, c, t, l)
 		liveVpd80, liveErr := getDeviceSerialByHctlFunc(h, c, t, l)
 		if liveErr != nil {
 			// continue with other paths
 			return false, "", liveErr
 		}
-		if cachedErr == nil && liveVpd80 == cachedVpd80 {
+		if cachedErr != nil {
+			// Fail safe: with no cached VPD80 to corroborate the bare wwid
+			// mismatch against, don't treat it as a remap - that was the
+			// pre-fix behavior and is exactly the ESC-18223 false teardown.
+			// A genuinely remapped 3PAR LUN with no readable vpd_pg80 is
+			// simply left for normal discovery to pick up.
+			log.Warnf("3PAR remap check: cached vpd_pg80 unreadable at %s:%s:%s:%s (%s); not treating as remap", h, c, t, l, cachedErr.Error())
+			return false, "", nil
+		}
+		if liveVpd80 == cachedVpd80 {
 			return false, "", nil
 		}
 		log.Debugf("found remapped lun with oldserial %s and Serial %s", oldSerial, serial)
@@ -1406,7 +1412,7 @@ func CreateLinuxDevices(vols []*model.Volume) (devs []*model.Device, err error) 
 			log.Errorf("unable to create device for volume %v with IQN %v", vol.Name, vol.Iqn)
 			// If we encounter an error, there may be some devices created and some not.
 			// If we fail the operation , then we need to rollback all the created device
-			//TODO : cleanup all the devices created
+			// TODO : cleanup all the devices created
 			return nil, err
 		}
 		devices = append(devices, device)
@@ -1446,7 +1452,7 @@ func offlineScsiDevices(paths []*model.PathInfo) error {
 
 func offlineScsiDevice(path string) (err error) {
 	log.Tracef("offlineScsiDevice called with %s", path)
-	//offline the path
+	// offline the path
 	offlinePath := fmt.Sprintf(offlinePathString, path)
 	is, _, _ := util.FileExists(offlinePath)
 	if !is {
@@ -1471,7 +1477,7 @@ func DeleteDevice(dev *model.Device) (err error) {
 		return fmt.Errorf("no serialNumber of device %v present, failing delete", dev)
 	}
 
-	//check if device is mounted or has holders
+	// check if device is mounted or has holders
 	err = checkIfDeviceCanBeDeleted(dev)
 	if err != nil {
 		return err
@@ -1524,7 +1530,7 @@ func retryTearDownMultipathDevice(dev *model.Device) error {
 // deleteSdDevice : delete the scsi device
 func deleteSdDevice(path string) (err error) {
 	log.Tracef("deleteSdDevice called with %s", path)
-	//deletePath for deleting the device
+	// deletePath for deleting the device
 	deletePath := fmt.Sprintf(deletePathString, path)
 	is, _, _ := util.FileExists(deletePath)
 	if !is {
@@ -1556,7 +1562,7 @@ func getDeviceHolders(dev *model.Device) (h string, err error) {
 	// walk all files in directory
 	err = filepath.Walk(directoryPath, func(path string, info os.FileInfo, err error) error {
 		if info != nil && !info.IsDir() {
-			//check for valid symlink
+			// check for valid symlink
 			var link string
 			link, err = os.Readlink(filepath.Join(directoryPath, info.Name()))
 			if err != nil {
@@ -1568,7 +1574,6 @@ func getDeviceHolders(dev *model.Device) (h string, err error) {
 		}
 		return err
 	})
-
 	if err != nil {
 		return "", err
 	}
