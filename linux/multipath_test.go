@@ -459,12 +459,66 @@ func TestRetryCleanupDeviceAndSlaves_BusyIsTerminalNotRetried(t *testing.T) {
 // ---- multipathRemoveDmDevice tests (review follow-up Medium-1c) ----
 // multipathRemoveDmDevice now uses `multipath -f` instead of `dmsetup remove
 // --force`, which installs an error table on an open map before reporting
-// busy (the exact ESC-18223/CON-4959 teardown trigger).
+// busy (the exact ESC-18223/CON-4959 teardown trigger). The exec is stubbed via
+// execMultipathFlush so these branches run without a real multipath binary.
 
-func TestMultipathRemoveDmDevice_AlreadyRemovedIsNotAnError(t *testing.T) {
-	// a name that cannot collide with any real multipath map on the test host
+func TestMultipathRemoveDmDevice_Branches(t *testing.T) {
+	origFlush := execMultipathFlush
+	defer func() { execMultipathFlush = origFlush }()
+
 	dev := &model.Device{MpathName: "mpathtest-con5018-not-a-real-device"}
-	if err := multipathRemoveDmDevice(dev); err != nil {
-		t.Fatalf("expected no error for an already-removed/nonexistent map, got %v", err)
+
+	tests := []struct {
+		name        string
+		stub        func(string) (string, error)
+		wantErr     bool
+		wantBusyMsg bool
+	}{
+		{
+			name:    "flush succeeds",
+			stub:    func(string) (string, error) { return "", nil },
+			wantErr: false,
+		},
+		{
+			name:    "already removed (No such device) is not an error",
+			stub:    func(string) (string, error) { return deviceDoesNotExist, fmt.Errorf("exit status 1: %s", deviceDoesNotExist) },
+			wantErr: false,
+		},
+		{
+			name:        "in use via libdevmapper busy string surfaces busy sentinel",
+			stub:        func(string) (string, error) { return "device-mapper: remove ioctl failed: " + multipathDeviceBusy, fmt.Errorf("exit status 1") },
+			wantErr:     true,
+			wantBusyMsg: true,
+		},
+		{
+			name:        "in use via multipath 'map in use' string surfaces busy sentinel",
+			stub:        func(string) (string, error) { return "mpathx: " + multipathMapInUse, fmt.Errorf("exit status 1") },
+			wantErr:     true,
+			wantBusyMsg: true,
+		},
+		{
+			name:    "other failure is a non-busy error",
+			stub:    func(string) (string, error) { return "some unexpected failure", fmt.Errorf("exit status 1") },
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			execMultipathFlush = tc.stub
+			err := multipathRemoveDmDevice(dev)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if tc.wantBusyMsg && !strings.Contains(err.Error(), multipathDeviceBusy) {
+				t.Errorf("expected busy sentinel %q, got %q", multipathDeviceBusy, err.Error())
+			}
+			if err != nil && !tc.wantBusyMsg && strings.Contains(err.Error(), multipathDeviceBusy) {
+				t.Errorf("non-busy failure must not be reported as busy, got %q", err.Error())
+			}
+		})
 	}
 }

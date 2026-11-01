@@ -25,6 +25,10 @@ var (
 	multipathMutex       sync.Mutex
 	DeviceVendorPatterns = []string{"Nimble", "3PARdata", "TrueNAS", "FreeNAS"}
 	multipathDeviceBusy  = "Device or resource busy"
+	// multipathMapInUse is the multipath-tools wording for an in-use map; the
+	// underlying libdevmapper error is multipathDeviceBusy, but the CLI may print
+	// only this, so match both.
+	multipathMapInUse = "map in use"
 )
 
 const (
@@ -32,6 +36,8 @@ const (
 	MultipathConf = "/etc/multipath.conf"
 	// MultipathBindings bindings file for multipathd
 	MultipathBindings = "/etc/multipath/bindings"
+	// multipathcommand is the multipath-tools CLI used to flush maps safely.
+	multipathcommand = "multipath"
 	// orphanPathsPattern captures WWID (first field from multipathd show paths output)
 	// along with H:C:T:L so that orphan paths can be scoped to a specific volume.
 	// multipathd show paths format: %w %d %t %i %o %T %z %s %m
@@ -287,6 +293,14 @@ func getDmOpenCount(mpathName string) (int, error) {
 // getDmOpenCountFunc is an indirection point so unit tests can stub the dmsetup call.
 var getDmOpenCountFunc = getDmOpenCount
 
+// execMultipathFlush runs `multipath -f <mpathName>` and returns its combined
+// output and error. It is a var so unit tests can exercise multipathRemoveDmDevice's
+// already-removed / in-use / error branches without a real multipath binary.
+var execMultipathFlush = func(mpathName string) (string, error) {
+	out, _, err := util.ExecCommandOutput(multipathcommand, []string{"-f", mpathName})
+	return out, err
+}
+
 // retry for maxtries for device Cleanup
 func retryCleanupDeviceAndSlaves(dev *model.Device) error {
 	log.Trace(">>>>> retryCleanupDeviceAndSlaves")
@@ -476,15 +490,15 @@ func multipathRemoveDmDevice(dev *model.Device) (err error) {
 	// what froze VMs in ESC-18223/CON-4959. `multipath -f` refuses an in-use
 	// map atomically (mpath_in_use -> DM_FLUSH_BUSY) and cleans up kpartx
 	// children correctly; mirrors tunelinux.RemoveMultipathDevice (CON-4887).
-	args := []string{"-f", dev.MpathName}
-	out, _, err := util.ExecCommandOutput("multipath", args)
+	out, err := execMultipathFlush(dev.MpathName)
 	if err != nil {
 		if strings.Contains(out, deviceDoesNotExist) {
 			// map is already gone, nothing left to remove
 			log.Debugf("multipath map %s already removed", dev.MpathName)
 			return nil
 		}
-		if strings.Contains(out, multipathDeviceBusy) || strings.Contains(err.Error(), multipathDeviceBusy) {
+		if strings.Contains(out, multipathDeviceBusy) || strings.Contains(out, multipathMapInUse) ||
+			strings.Contains(err.Error(), multipathDeviceBusy) || strings.Contains(err.Error(), multipathMapInUse) {
 			return fmt.Errorf("%s: failed to flush multipath map %s: %s", multipathDeviceBusy, dev.MpathName, err.Error())
 		}
 		return fmt.Errorf("failed to remove multipath map for %s. Error: %s", dev.MpathName, err.Error())
